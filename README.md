@@ -1,217 +1,300 @@
-# ngraph.path
-
-Fast path finding for arbitrary graphs. [Play with a demo](https://anvaka.github.io/ngraph.path.demo/) or [watch it](https://www.youtube.com/watch?v=hGeZuIEV6KU) on YouTube.
+# ngraph.path demo
 
 [![demo](https://raw.githubusercontent.com/anvaka/ngraph.path/master/docs/seattle.gif)](https://anvaka.github.io/ngraph.path.demo/)
 
-If you want to learn how the demo was made, please refer to the [demo's source code](https://github.com/anvaka/ngraph.path.demo#ngraphpath-demo).
-I tried to describe it in great details.
+This repository is a demo for the [ngraph.path](https://github.com/anvaka/ngraph.path) library.
+While its main purpose is to show the capabilities of the library, below you can find some
+design decisions for the demo itself.
 
-# Performance
+**Table of contents**
 
-I measured performance of this library on New York City roads graph (`733,844` edges, `264,346` nodes).
-It was done by solving `250` random path finding problems. Each algorithm was solving
-the same set of problems. Table below shows required time to solve one problem.
+* [Data preparation](https://github.com/anvaka/ngraph.path.demo#data-preparation)
+* [Storing a graph](https://github.com/anvaka/ngraph.path.demo#storing-a-graph)
+* [Mobile first](https://github.com/anvaka/ngraph.path.demo#mobile-first)
+* [Async everything](https://github.com/anvaka/ngraph.path.demo#async-everything)
+* [Rendering](https://github.com/anvaka/ngraph.path.demo#rendering)
+  * [Battery](https://github.com/anvaka/ngraph.path.demo#battery)
+  * [Text and lines](https://github.com/anvaka/ngraph.path.demo#text-and-lines)
+  * [Pan and zoom](https://github.com/anvaka/ngraph.path.demo#pan-and-zoom)
+* [Hit testing](https://github.com/anvaka/ngraph.path.demo#hit-testing)
+* [The path finding](https://github.com/anvaka/ngraph.path.demo#the-path-finding)
 
-|                                        | Average | Median | Min | Max   | p90   | p99   |
-|----------------------------------------|---------|:------:|:---:|-------|-------|-------|
-|      A* greedy (suboptimal)            |   32ms  |  24ms  | 0ms | 179ms |  73ms | 136ms |
-|      NBA*                              |   44ms  |  34ms  | 0ms | 222ms | 107ms | 172ms |
-|      A*, unidirectional                |   55ms  |  38ms  | 0ms | 356ms | 123ms | 287ms |
-|      Dijkstra                          |  264ms  | 258ms  | 0ms | 782ms | 483ms | 631ms |
 
-"A* greedy" converged the fastest, however, as name implies the found path is not necessary
-globally optimal.
+## Data preparation
 
-## Why is it fast?
+Data generated and stored in this repository comes from www.openstreetmap.org
+(it is made available under [ODbL](https://opendatacommons.org/licenses/odbl/)).
 
-There are a few things that contribute to the performance of this library.
+*NB: The NYC graph was downloaded from http://www.dis.uniroma1.it/challenge9/download.shtml*
 
-I'm using heap-based priority queue, built specifically for the path finding.
-I [modified a heap's](https://github.com/anvaka/ngraph.path/blob/master/a-star/NodeHeap.js) implementation,
-so that changing priority of any element takes `O(lg n)` time.
+Before this project, I didn't realize how powerful is the Open Street Map API (OSM API). Tools like
+http://overpass-turbo.eu/ allows you to quickly build a query and fetch any information
+about anything on the map. Including roads and their intersections.
 
-Each path finder opens many graph nodes during its exploration, which creates pressure
-on garbage collector. To avoid the pressure, I've created an [object pool](https://github.com/anvaka/ngraph.path/blob/master/a-star/nba/makeNBASearchStatePool.js),
-which recycles nodes when possible.
-
-In general, the `A*` algorithm helps to converge to the optimal solution faster than
-Dijkstra, because it uses "hints" from the heuristic function. When search is performed
-in both directions (`source -> target` and `target -> source`), the convergence can be
-improved even more. The [NBA*](https://github.com/anvaka/ngraph.path/blob/master/a-star/nba/index.js) algorithm
-is a bi-directional path finder, that guarantees optimal shortest path. At the same time it
-removes balanced heuristic requirement. It also seem to be the fastest algorithm, among implemented 
-here *(NB: If you have suggestions how to improve this even further - please let me know!)*
-
-I also tried to create my own version of bi-directional A* search, which
-turned out to be harder than I expected - the two searches met each other quickly, but the point
-where they met was not necessary on the shortest global path. It was close to optimal, but not the optimal.
-I wanted to remove the code, but then changed my mind: It finds a path very quickly. So, in case when
-speed matters more than correctness, this could be a good trade off. I called this algorithm `A* greedy`,
-but maybe it should be `A* lazy`.
-
-# usage
-
-## installation
-
-You can install this module, bu requiring it from npm:
+For example, this query will return all cycle tracks in Seattle:
 
 ```
-npm i ngraph.path
+[out:json];
+// Fetch the area id into variable `a`
+(area["name"="Seattle"]["place"="city"])->.a;
+
+// Fetch all ways with a highway tag equal to `cycleway`
+// inside area `a`
+way["highway"="cycleway"](area.a);
+
+// And join those highways with lat/lon points:
+node(w);
+
+// print everything to the output.
+out meta;
 ```
 
-Or download from CDN:
+You can read more about overpass API here: http://wiki.openstreetmap.org/wiki/Overpass_API
 
-``` html
-<script src='https://unpkg.com/ngraph.path@1.3.1/dist/ngraph.path.min.js'></script>
+At the end, I created [different scripts](https://github.com/anvaka/extract-osm-roads)
+to convert roads into a graph format. In this graph, each road is an edge, and each intersection
+is a node. The scripts are not documented and are not intended for reuse,
+but let me know if you need something like this in a separate package.
+
+## Storing a graph
+
+Once data is fetched from OSM, I save the graph into a binary format. My main goal here was to
+compress the data as much as possible, but don't spend too much time on the algorithm.
+
+So, I decided to save graphs into two binary files. One file for coordinates, and the other one for
+the edges.
+
+The *coordinates file* is just a flat sequence of `x, y` pairs (int32, 4 bytes per coordinate).
+The index where a pair appears, corresponds to a node's identifier.
+
+![node id](https://raw.githubusercontent.com/anvaka/ngraph.path.demo/master/docs/grpah_coordinates.png)
+
+The *edges file* then becomes a flat sequence of `fromNodeId`, `toNodeId` pairs.
+
+![edges](https://raw.githubusercontent.com/anvaka/ngraph.path.demo/master/docs/edges.png)
+
+This means that node `1` has a link to `2`, and `2` has a link to `3`, and so on.
+
+The required storage size for any graph with `V` nodes and `E` edges can be calculated as:
+
+``` python
+ storage_size = V * 4 * 2 +  # 4 bytes per two coordinates per node
+                E * 4 * 2 =  # 4 bytes per two node ids per edge
+                (V + E) * 8  # in bytes
 ```
 
-If you download from CDN the library will be available under `ngraphPath` global name.
+This is not the most efficient compression algorithm, but it was very easy to implement
 
-## Basic usage
+Note: Originally I wanted to include edge weights to the format (one more int32 record),
+but that made loading of the graph over mobile connection very slow.
 
-This is a basic example, which finds a path between arbitrary
-two nodes in arbitrary graph
+## Mobile first
+
+I believe long gone the times, when mobile was a "nice to have" addition. I imagined, when
+I publish this project, majority of my visitors will read about it on a mobile device.
+And if they will not be able to see the demo fast - I'll lose them as much fast.
+
+So, everything what I did was tested on mobile. I have a very fast telephone from
+"some kind of a fruit company", but I also wanted to be sure that it will work
+on Android. For these purposes, I bought [one of the cheapest phones](https://www.amazon.com/gp/product/B00K2XX4OY).
+This phone helped me discover a lot of usability and performance problems.
+
+## Async everything
+
+The slowest part was initial loading of the website. The code to load graph
+looked something like this:
 
 ``` js
-let path = require('ngraph.path');
-let pathFinder = path.aStar(graph); // graph is https://github.com/anvaka/ngraph.graph
+for (let i = 0; i < points.length; i += 2) {
+    let nodeId = Math.floor(i / 2);
 
-// now we can find a path between two nodes:
-let fromNodeId = 40;
-let toNodeId = 42;
-let foundPath = pathFinder.find(fromNodeId, toNodeId);
-// foundPath is array of nodes in the graph
+    let x = points[i + 0];
+    let y = points[i + 1];
+
+    // graph is an instance of https://github.com/anvaka/ngraph.graph
+    graph.addNode(nodeId, { x, y })
+}
 ```
 
-Example above works for any graph, and it's equivalent to unweighted [Dijkstra's algorithm](https://en.wikipedia.org/wiki/Dijkstra%27s_algorithm).
+This may not seem like a problem at the first glance, but when you run this code
+on a large graph and a not very powerful mobile device, the page becomes
+unresponsive, and the website appears dead.
 
-## Weighted graph
+How can we solve this? I saw some people transfer CPU intensive tasks to WebWorkers.
+That is a very decent approach in many cases. Unfortunately, using WebWorkers implies
+more coding complexity, than I wanted to allow for this demo project. We would have
+to think about data transfer, battery lifetime, threads synchronization, fallback
+alternatives etc.
 
-Let's say we have the following graph:
+So, what can we do instead? I decided to break the loop. I'd run it for a few iterations,
+check how much time it took us, and then schedule next chunk of work with `setTimeout()`.
+This is implemented in [rafor](https://github.com/anvaka/rafor).
+
+Using asynchronous `for` loop, allowed me to constantly inform the outer world
+about what is going on inside:
+
+![rafor](https://raw.githubusercontent.com/anvaka/ngraph.path.demo/master/docs/load-async.gif)
+
+## Rendering
+
+Now that we have a graph, it's time to show it on the screen. Obviously,
+we cannot use SVG to show millions of elements - that would be impossibly slow.
+One way to go about it would be to generate tiles, and use something like [Leaflet](http://leafletjs.com/) or [OpenSeadragon](https://openseadragon.github.io/)
+to render a map.
+
+I wanted to have more control over the code (as well as learn more about WebGL),
+so I built a WebGL renderer from scratch. It employs a "scene graph" paradigm,
+where scene is constructed from primitive elements. During frame rendering, the
+scene graph is traversed, and nodes are given opportunity to refresh their presentation.
+
+*NOTE: The renderer is [available here](https://github.com/anvaka/wgl), but it is
+intentionally under-documented. I'm not planning to "release" it yet,
+as I'm not 100% sure I like everything about it.*
+
+### Battery
+
+![battery](https://raw.githubusercontent.com/anvaka/ngraph.path.demo/master/docs/battery.png)
+
+Initial implementation was re-rendering scene on every frame from scratch. Very quickly
+I realized that this makes mobile device very hot very soon, and the battery goes from
+`100%` to `0%` in a quick fashion.
+
+This was especially painful during programming. I was working on this demo in my spare
+time from coffee shops, with limited access to power. So I had to either think faster
+or find a way to conserve energy :).
+
+I still haven't figured out how to think faster, so I tried the latter approach.
+Turns out solution was simple:
+
+> Don't render scene on every single frame. Render it only when explicitly asked,
+> or when we know for sure that the scene was changed.
+
+This may sound too obvious now, but it wasn't before. Most WebGL tutorials suggest a simple
+loop:
 
 ``` js
-let createGraph = require('ngraph.graph');
-let graph = createGraph();
+function frame() {
+    requestAnimationFrame(frame); // schedule next frame;
 
-graph.addLink('a', 'b', {weight: 10});
-graph.addLink('a', 'c', {weight: 10});
-graph.addLink('c', 'd', {weight: 5});
-graph.addLink('b', 'd', {weight: 10});
+    renderScene(); // render current frame.
+    // nothing wrong with this, but this may drain battery quickly
+}
 ```
 
-![weighted](https://raw.githubusercontent.com/anvaka/ngraph.path/master/docs/weighted.png)
-
-We want to find a path with the smallest possible weight:
+With "conservative" approach, I had to move `requestAnimationFrame` outside from the `frame()` method:
 
 ``` js
-let pathFinder = aStar(graph, {
-  // We tell our pathfinder what should it use as a distance function:
-  distance(fromNode, toNode, link) {
-    // We don't really care about from/to nodes in this case,
-    // as link.data has all needed information:
-    return link.data.weight;
-  }
-});
-let path = pathFinder.find('a', 'd');
+let frameToken = 0;
+
+function renderFrame() {
+    if (!frameToken) frameToken = requestAnimationFrame(frame);
+}
+
+function frame() {
+    frameToken = 0;
+    renderScene();
+}
 ```
 
-This code will correctly print a path: `d <- c <- a`.
+This approach allows anybody to schedule next frame in response to actions. For example,
+when user drags scene and changes transformation matrix, we can call `renderFrame()` to update the scene.
 
-## Guided (A-Star)
+The `frameToken` de-dupes multiple calls to `renderFrame()`.
 
-When pathfinder searches for a path between two nodes it considers all
-neighbors of a given node without any preference. In some cases we may want to
-guide the pathfinder and tell it our preferred exploration direction.
+Yes, conservative approach required a little bit more work, but at the end, battery life was amazing.
 
-For example, when each node in a graph has coordinates, we can assume that 
-nodes that are closer towards the path-finder's target should be explored 
-before other nodes.
+### Text and lines
+
+WebGL is not the most intuitive framework. It is notoriously hard to deal with text and
+"wide lines" (i.e. lines with width greater than 1px) in WebGL.
+
+![zoom-scale](https://raw.githubusercontent.com/anvaka/ngraph.path.demo/master/docs/zoom-scale.gif)
+
+As I'm still learning WebGL, I realize that it would take me long time to build
+a decent wide lines rendering or add text support.
+
+On the other hand, I want wide lines and text only to show a path. A few DOM nodes
+should be enough...
+
+Turns out, it was straightforward to add [a new element](https://github.com/anvaka/ngraph.path.demo/blob/master/src/SVGContainer.js)
+to the scene graph, which applies transforms to SVG element. The SVG element is
+given transparent background and `pointer-events: none;` so it's completely invisible
+from interaction standpoint:
+
+![svg overlay](https://raw.githubusercontent.com/anvaka/ngraph.path.demo/master/docs/svg-overlay.png)
+
+### Pan and zoom
+
+I wanted to make pan and zoom interaction similar to what you would normally expect from a website like Google Maps.
+
+I've already implemented a pan/zoom library for SVG: [anvaka/panzoom](https://github.com/anvaka/panzoom).
+With few changes to the code, I decoupled transform computation from transform application.
+
+So, panzoom listens to input events (`mousedown`, `touchstart`, etc.), performs smooth transition on
+a transformation matrix, and forwards this matrix to a "controller". It is responsibility of the
+controller to apply transforms.
+
+This is not yet documented in the `panzoom` library, but this is all it takes to enable pan/zoom in WebGL:
+
+1. [Define custom transformation controller]( https://github.com/anvaka/wgl/blob/1abd96b7ff0cc9c0c037503d528ce426fe6d9794/src/scene.js#L42-L45)
+2. [React to transformation events](https://github.com/anvaka/wgl/blob/1abd96b7ff0cc9c0c037503d528ce426fe6d9794/src/scene.js#L183-L200)
+
+## Hit testing
+
+At this point we discussed how the data is loaded, how it is rendered, and how we can move around the graph.
+But how do we know which point is being clicked? Where are the `start` and the `end` points of the path?
+
+When we click on the scene, we could naively iterate over all points and find the nearest point to our
+click. In fact, this is a decent solution if you have a thousand points or less. In our case, with several
+hundred thousands points, that would be very slow.
+
+I used a [QuadTree](https://en.wikipedia.org/wiki/Quadtree) to build an index of points. After QuadTree is created,
+you can query it in logarithmic time for the nearest neighbors around any coordinate.
+While `QuadTree` may sound scarry, it's not very much different from a regular binary tree.
+It is easy to learn, easy to build and use.
+
+In particular, I used my own [yaqt](https://github.com/anvaka/yaqt) library, because it had minimal memory overhead for
+my data layout. There are better alternatives that you might want to try as well (for example,
+[d3-quadtree](https://github.com/d3/d3-quadtree)).
+
+## The path finding
+
+We have all pieces in place: we have the graph, we know how to render it, and we know what was clicked.
+Now it's time to find the shortest path:
 
 ``` js
-let createGraph = require('ngraph.graph');
-let graph = createGraph();
+let start = window.performance.now();
 
-// Our graph has cities:
-graph.addNode('NYC', {x: 0, y: 0});
-graph.addNode('Boston', {x: 1, y: 1});
-graph.addNode('Philadelphia', {x: -1, y: -1});
-graph.addNode('Washington', {x: -2, y: -2});
+// pathfinder is an instance of https://github.com/anvaka/ngraph.path
+let path = pathFinder.find(fromId, toId);
 
-// and railroads:
-graph.addLink('NYC', 'Boston');
-graph.addLink('NYC', 'Philadelphia');
-graph.addLink('Philadelphia', 'Washington');
+let end = window.performance.now() - start;
 ```
 
-![guided](https://raw.githubusercontent.com/anvaka/ngraph.path/master/docs/guided.png)
+I was contemplating about adding asynchronous path finding, but decided to put that work off, until it is really
+necessary (let me know).
 
-When we build the shortest path from NYC to Washington, we want to tell the pathfinder
-that it should prefer Philadelphia over Boston.
+# Developing locally
 
-``` js
-let pathFinder = aStar(graph, {
-  distance(fromNode, toNode) {
-    // In this case we have coordinates. Lets use them as
-    // distance between two nodes:
-    let dx = fromNode.data.x - toNode.data.x;
-    let dy = fromNode.data.y - toNode.data.y;
+If you'd like to try this website locally:
 
-    return Math.sqrt(dx * dx + dy * dy);
-  },
-  heuristic(fromNode, toNode) {
-    // this is where we "guess" distance between two nodes.
-    // In this particular case our guess is the same as our distance
-    // function:
-    let dx = fromNode.data.x - toNode.data.x;
-    let dy = fromNode.data.y - toNode.data.y;
+``` bash
+# install dependencies
+npm install
 
-    return Math.sqrt(dx * dx + dy * dy);
-  }
-});
-let path = pathFinder.find('NYC', 'Washington');
+# serve with hot reload at localhost.
+npm start
+
+# build for production with minification
+npm run build
+
+# build for production and view the bundle analyzer report
+npm run build --report
 ```
 
-With this simple heuristic our algorithm becomes smarter and faster.
+# Thank you
 
-It is very important that our heuristic function does not overestimate actual distance
-between two nodes. If it does so, then algorithm cannot guarantee the shortest path.
+Thanks for reading this! I hope you enjoyed it as much as I enjoyed creating the [ngraph.path](https://github.com/anvaka/ngraph.path)
+library.
 
-## oriented graphs
-
-If you want the pathfinder to treat your graph as oriented - pass `oriented: true` setting:
-
-``` js
-let pathFinder = aStar(graph, {
-  oriented: true
-});
-```
-
-## available finders
-
-The library implements a few A* based path finders:
-
-``` js
-let aStarPathFinder = path.aStar(graph, options);
-let aGreedyStar = path.aGreedy(graph, options);
-let nbaFinder = path.nba(graph, options);
-```
-
-Each finder has just one method `find(fromNodeId, toNodeId)`, which returns array of
-nodes, that belongs to the found path. If no path exists - empty array is returned.
-
-# Which finder to choose?
-
-With many options available, it may be confusing whether to pick Dijkstra or A*.
-
-I would pick Dijkstra if there is no way to guess a distance between two arbitrary nodes
-in a graph. If we can guess distance between two nodes - pick A*.
-
-Among algorithms presented above, I'd recommend `A* greedy` if you care more about speed and
-less about accuracy. However if accuracy is your top priority - choose `NBA*`. 
-This is a bi-directional, optimal A* algorithm with very good exit criteria. You can read
-about it here: https://repub.eur.nl/pub/16100/ei2009-10.pdf
-
-# license
-
-MIT
+Have fun!

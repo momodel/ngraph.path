@@ -1,17 +1,16 @@
-lib-cov
-*.seed
-*.log
-*.csv
-*.dat
-*.out
-*.pid
-*.gz
 .DS_Store
-.nyc_output
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-pids
-logs
-results
-
-npm-debug.log
-node_modules
+data
+src/ngraph.path
+static/USA-*
+# Editor directories and files
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
